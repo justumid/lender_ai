@@ -2,47 +2,56 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class FraudVAE(nn.Module):
-    """
-    🕵️ Variational Autoencoder for fraud anomaly detection
-    """
-    def __init__(self, input_dim: int = 22, hidden_dim: int = 64, latent_dim: int = 8):
+    def __init__(self, input_dim=10, seq_len=12, latent_dim=8):
         super().__init__()
+        self.input_dim = input_dim
+        self.seq_len = seq_len
+        self.latent_dim = latent_dim
+        flattened = input_dim * seq_len  # 12×10 = 120 if combined salary+credit
+
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(flattened, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
             nn.ReLU()
         )
-        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        self.fc_mu = nn.Linear(64, latent_dim)
+        self.fc_logvar = nn.Linear(64, latent_dim)
 
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
+            nn.Linear(latent_dim, 64),
             nn.ReLU(),
-            nn.Linear(hidden_dim, input_dim)
+            nn.Linear(64, 128),
+            nn.ReLU(),
+            nn.Linear(128, flattened),
+            nn.Sigmoid()  # use sigmoid for bounded output
         )
 
-    def encode(self, x: torch.Tensor):
+    def encode(self, x):
         h = self.encoder(x)
-        return self.fc_mu(h), self.fc_logvar(h)
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h)
+        return mu, logvar
 
-    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor):
+    def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def decode(self, z: torch.Tensor):
+    def decode(self, z):
         return self.decoder(z)
 
-    def forward(self, x: torch.Tensor):
-        mu, logvar = self.encode(x)
+    def forward(self, x):
+        # x: [B, 12, 10] → flatten
+        x_flat = x.view(x.size(0), -1)
+        mu, logvar = self.encode(x_flat)
         z = self.reparameterize(mu, logvar)
-        x_recon = self.decode(z)
-        return x_recon, mu, logvar
+        recon_flat = self.decode(z)
+        recon = recon_flat.view(x.size())  # [B, 12, 10]
+        return recon, mu, logvar
 
-    def anomaly_score(self, x: torch.Tensor):
-        """
-        Computes reconstruction MSE as fraud risk signal
-        """
-        x_recon, _, _ = self.forward(x)
-        return F.mse_loss(x_recon, x, reduction='none').mean(dim=1)
+    def anomaly_score(self, x):
+        recon, _, _ = self.forward(x)
+        loss = F.mse_loss(recon, x, reduction='none').mean(dim=(1, 2))  # mean over features + time
+        return loss  # [B]

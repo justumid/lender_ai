@@ -1,15 +1,14 @@
-# app/schemas/scoring_response.py
-
-from typing import Dict, Optional
 from pydantic import BaseModel
-
+from typing import Optional, Dict
 
 class ScoringResponse(BaseModel):
     pinfl: str
-    credit_score: float
-    decision: str
-    loan_limit: Optional[float]
-    fraud_risk: float
+    approval_decision: Optional[str]
+    final_score: float
+    loan_limit: float
+    fraud_score: float
+    vae_anomaly: float
+    confidence_level: str
     segment_id: str
-    volatility_profile: Dict[str, float]
+    fraud_alert: str
     explanations: Dict[str, float]

@@ -1,52 +1,90 @@
-
 import torch
 import torch.nn as nn
-import math
+
+class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.attn_weights = None
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        src2, attn = self.self_attn(
+            src, src, src, attn_mask=src_mask,
+            key_padding_mask=src_key_padding_mask,
+            need_weights=True, average_attn_weights=False
+        )
+        self.attn_weights = attn  # shape: [B, N, T, T]
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+        return src
+
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=100):
+    def __init__(self, dim_model: int, max_len: int = 100):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, dim_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, dim_model, 2) * (-torch.log(torch.tensor(10000.0)) / dim_model))
+
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
+        self.pe = pe.unsqueeze(0)
 
     def forward(self, x):
-        return x + self.pe[:, :x.size(1)]
+        return x + self.pe[:, :x.size(1)].to(x.device)
+
 
 class DeepCreditEncoder(nn.Module):
-    def __init__(self, input_dim=2, hidden_dim=128, n_heads=4, ff_dim=256, num_layers=2, dropout=0.1):
+    def __init__(self, salary_input_dim=5, credit_input_dim=5,
+                 hidden_dim=128, nhead=4, nlayers=2, return_attention=False):
         super().__init__()
-        self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, num_layers=1,
-                            batch_first=True, bidirectional=True)
+        self.return_attention = return_attention
 
-        self.pos_encoder = PositionalEncoding(d_model=hidden_dim * 2)
+        self.salary_lstm = nn.LSTM(salary_input_dim, hidden_dim, batch_first=True, bidirectional=True)
+        self.credit_lstm = nn.LSTM(credit_input_dim, hidden_dim, batch_first=True, bidirectional=True)
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_dim * 2,
-            nhead=n_heads,
-            dim_feedforward=ff_dim,
-            dropout=dropout,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.salary_pos = PositionalEncoding(dim_model=hidden_dim * 2)
+        self.credit_pos = PositionalEncoding(dim_model=hidden_dim * 2)
 
-        self.output_layer = nn.Sequential(
+        self.salary_layers = nn.ModuleList([
+            CustomTransformerEncoderLayer(d_model=hidden_dim * 2, nhead=nhead, batch_first=True)
+            for _ in range(nlayers)
+        ])
+        self.credit_layers = nn.ModuleList([
+            CustomTransformerEncoderLayer(d_model=hidden_dim * 2, nhead=nhead, batch_first=True)
+            for _ in range(nlayers)
+        ])
+
+        self.fusion = nn.Sequential(
+            nn.Linear(hidden_dim * 4, hidden_dim * 2),
+            nn.ReLU(),
             nn.LayerNorm(hidden_dim * 2),
-            nn.Linear(hidden_dim * 2, hidden_dim)
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU()
         )
 
-    def forward(self, x, mask=None):
-        lstm_out, _ = self.lstm(x)
-        encoded = self.pos_encoder(lstm_out)
+    def forward(self, salary_seq: torch.Tensor, credit_seq: torch.Tensor):
+        salary_out, _ = self.salary_lstm(salary_seq)
+        credit_out, _ = self.credit_lstm(credit_seq)
 
-        if mask is not None:
-            encoded = self.transformer(encoded, src_key_padding_mask=mask)
-        else:
-            encoded = self.transformer(encoded)
+        salary_encoded = self.salary_pos(salary_out)
+        credit_encoded = self.credit_pos(credit_out)
 
-        cls_vector = encoded[:, 0]
-        return self.output_layer(cls_vector)
+        attn_s, attn_c = [], []
+        for layer in self.salary_layers:
+            salary_encoded = layer(salary_encoded)
+            if self.return_attention: attn_s.append(layer.attn_weights)
+
+        for layer in self.credit_layers:
+            credit_encoded = layer(credit_encoded)
+            if self.return_attention: attn_c.append(layer.attn_weights)
+
+        salary_vec = salary_encoded[:, 0, :]
+        credit_vec = credit_encoded[:, 0, :]
+        fused = self.fusion(torch.cat([salary_vec, credit_vec], dim=1))
+
+        if self.return_attention:
+            return fused, attn_s, attn_c
+        return fused

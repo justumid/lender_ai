@@ -1,29 +1,31 @@
-# app/services/explanation.py
+import torch
+import torch.nn.functional as F
+from typing import Dict, Tuple
+from models.deep_encoder import DeepCreditEncoder
+from app.services.preprocessing import extract_sequences
 
-import shap
-import numpy as np
-from typing import Dict, List
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Load encoder with exposed attention
+encoder = DeepCreditEncoder(return_attention=True).to(device).eval()
 
-class ShapExplainer:
-    def __init__(self, model, feature_names: List[str]):
-        self.model = model
-        self.feature_names = feature_names
-        self.explainer = shap.Explainer(self._predict, algorithm="permutation")
+def explain_attention(applicant: Dict) -> Dict:
+    """
+    Returns attention scores for salary and credit sequences.
+    """
+    with torch.no_grad():
+        salary_seq, credit_seq = extract_sequences(applicant)
+        salary_seq = salary_seq.unsqueeze(0).to(device)
+        credit_seq = credit_seq.unsqueeze(0).to(device)
 
-    def _predict(self, x: np.ndarray):
-        import torch
-        with torch.no_grad():
-            tensor = torch.tensor(x, dtype=torch.float32)
-            return self.model(tensor).detach().numpy()
+        # Run forward with attention
+        embedding, attn_s, attn_c = encoder(salary_seq, credit_seq)
 
-    def explain(self, x: np.ndarray, top_n: int = 5) -> Dict[str, float]:
-        try:
-            shap_values = self.explainer(x)
-            scores = dict(zip(self.feature_names, shap_values.values[0]))
-            ranked = sorted(scores.items(), key=lambda x: abs(x[1]), reverse=True)[:top_n]
-            return {k: round(v, 4) for k, v in ranked}
-        except Exception as e:
-            print(f"⚠️ SHAP explanation failed: {e}")
-            return {k: 0.0 for k in self.feature_names[:top_n]}
+        # Get attention from first head of last layer [B, N, T, T]
+        salary_attn = attn_s[-1][0, 0].cpu().numpy().tolist()
+        credit_attn = attn_c[-1][0, 0].cpu().numpy().tolist()
 
+        return {
+            "salary_attention": salary_attn,
+            "credit_attention": credit_attn
+        }

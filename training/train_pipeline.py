@@ -1,100 +1,98 @@
 import torch
-import numpy as np
+import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, mean_absolute_error, roc_auc_score, r2_score
+import json
+import os
 
 from models.deep_encoder import DeepCreditEncoder
 from models.transformer_heads import RiskClassifierHead, LoanLimitRegressor, FraudDetectorHead
+from models.fraud_vae import FraudVAE
+from models.simclr_encoder import SimCLREncoder
+from trainer import DeepTrainer
 
+# 🔧 Training configuration
+EPOCHS = 30
+BATCH_SIZE = 32
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DATA_PATH = "demo_data/synthetic_dataset.json"
 
+def load_dataset(path=DATA_PATH):
+    with open(path, "r") as f:
+        raw_data = json.load(f)
 
-def load_dataset(json_path="demo_data/synthetic_dataset.json"):
-    import json
-    from app.services.feature_generator import generate_sequences
+    X, y_risk, y_limit = [], [], []
+    for rec in raw_data:
+        seq = rec.get("sequence_tensor", [])
+        if not seq or len(seq) != 12:
+            continue
+        X.append(seq)
+        y_risk.append(rec.get("y_risk", 0))
+        y_limit.append(rec.get("loan_limit", 0))
 
-    with open(json_path, "r", encoding="utf-8") as f:
-        records = json.load(f)
+    X = torch.tensor(X, dtype=torch.float32)
+    y_risk = torch.tensor(y_risk, dtype=torch.float32)
+    y_limit = torch.tensor(y_limit, dtype=torch.float32)
+    return X, y_risk, y_limit
 
-    X_seq, y_risk, y_limit, y_fraud = [], [], [], []
+def train():
+    # Load and prepare dataset
+    X, y_risk, y_limit = load_dataset()
+    dataset = TensorDataset(X, y_risk, y_limit)
+    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    for sample in records:
-        seq = generate_sequences(sample)
-        salary = seq["salary_sequence"]
-        tax = seq["tax_sequence"]
-        paired = list(zip(salary, tax))
-        padded = paired[:24] + [(0, 0)] * max(0, 24 - len(paired))
-        X_seq.append(padded)
-
-        flat = sample["features"] if "features" in sample else sample  # fallback
-        y_risk.append(1 if flat.get("normalized_score", 0) < 60 else 0)
-        y_limit.append(float(flat.get("salary_mean_6mo", 0)) * 6)
-        y_fraud.append(1 if flat.get("salary_volatility_6mo", 0) > 0.4 else 0)
-
-    return (
-        np.array(X_seq, dtype=np.float32),
-        np.array(y_risk, dtype=np.int64),
-        np.array(y_limit, dtype=np.float32),
-        np.array(y_fraud, dtype=np.int64)
-    )
-
-
-def train_model():
-    X, y_risk, y_limit, y_fraud = load_dataset()
-    dataset = TensorDataset(torch.tensor(X), torch.tensor(y_risk), torch.tensor(y_limit), torch.tensor(y_fraud))
-    loader = DataLoader(dataset, batch_size=32, shuffle=True)
-
-    encoder = DeepCreditEncoder(input_dim=2).to(DEVICE)
+    # Initialize models
+    encoder = DeepCreditEncoder().to(DEVICE)
     risk_head = RiskClassifierHead().to(DEVICE)
     limit_head = LoanLimitRegressor().to(DEVICE)
     fraud_head = FraudDetectorHead().to(DEVICE)
+    vae = FraudVAE().to(DEVICE)
+    simclr = SimCLREncoder().to(DEVICE)
 
-    optim = torch.optim.Adam(
+    # Optimizer and loss functions
+    optimizer = torch.optim.Adam(
         list(encoder.parameters()) +
         list(risk_head.parameters()) +
         list(limit_head.parameters()) +
-        list(fraud_head.parameters()),
+        list(fraud_head.parameters()) +
+        list(vae.parameters()) +
+        list(simclr.parameters()),
         lr=1e-3
     )
 
-    bce = torch.nn.BCELoss()
-    mse = torch.nn.MSELoss()
+    loss_funcs = {
+        "bce": nn.BCELoss(),
+        "mse": nn.MSELoss()
+    }
 
-    for epoch in range(10):
-        encoder.train()
-        total_loss = 0.0
+    # Trainer class
+    trainer = DeepTrainer(
+        models={
+            "encoder": encoder,
+            "risk": risk_head,
+            "limit": limit_head,
+            "fraud": fraud_head,
+            "vae": vae,
+            "simclr": simclr
+        },
+        optim=optimizer,
+        loss_funcs=loss_funcs,
+        device=DEVICE
+    )
 
-        for batch_x, batch_risk, batch_limit, batch_fraud in loader:
-            batch_x = batch_x.to(DEVICE)
-            batch_risk = batch_risk.float().to(DEVICE)
-            batch_limit = batch_limit.to(DEVICE)
-            batch_fraud = batch_fraud.float().to(DEVICE)
+    # Training loop
+    for epoch in range(EPOCHS):
+        print(f"\n--- Epoch {epoch + 1}/{EPOCHS} ---")
+        losses = trainer.train_epoch(loader)
+        print("Losses:", losses)
 
-            z = encoder(batch_x)
-            pred_risk = risk_head(z)
-            pred_limit = limit_head(z)
-            pred_fraud = fraud_head(z)
-
-            loss = (
-                bce(pred_risk, batch_risk) +
-                mse(pred_limit, batch_limit) +
-                bce(pred_fraud, batch_fraud)
-            )
-
-            optim.zero_grad()
-            loss.backward()
-            optim.step()
-            total_loss += loss.item()
-
-        print(f"📊 Epoch {epoch+1} - Loss: {total_loss:.4f}")
-
-    torch.save(encoder.state_dict(), "models/deep_encoder.pt")
-    torch.save(risk_head.state_dict(), "models/risk_head.pt")
-    torch.save(limit_head.state_dict(), "models/limit_head.pt")
-    torch.save(fraud_head.state_dict(), "models/fraud_head.pt")
-    print("✅ Models saved.")
-
+    # Save models
+    os.makedirs("checkpoints", exist_ok=True)
+    torch.save(encoder.state_dict(), "checkpoints/encoder.pt")
+    torch.save(risk_head.state_dict(), "checkpoints/risk_head.pt")
+    torch.save(limit_head.state_dict(), "checkpoints/limit_head.pt")
+    torch.save(fraud_head.state_dict(), "checkpoints/fraud_head.pt")
+    torch.save(vae.state_dict(), "checkpoints/vae.pt")
+    torch.save(simclr.state_dict(), "checkpoints/simclr.pt")
 
 if __name__ == "__main__":
-    train_model()
+    train()

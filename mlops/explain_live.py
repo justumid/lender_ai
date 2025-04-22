@@ -1,18 +1,17 @@
-import shap
-import numpy as np
-from xgboost import XGBClassifier
-import joblib
+import torch
+import json
+from app.services.data_ingestion import fetch_user_data_by_pinfl
+from app.services.explanation import explain_attention
 
-class LiveExplainer:
-    def __init__(self, model_path, feature_names):
-        self.model = joblib.load(model_path)
-        self.feature_names = feature_names
-        self.explainer = shap.Explainer(self.model, feature_names=feature_names)
+def explain_from_db(pinfl: str):
+    applicant = fetch_user_data_by_pinfl(pinfl)
+    if not applicant:
+        print(f"[X] No applicant found for PINFL: {pinfl}")
+        return
 
-    def explain_instance(self, instance: np.ndarray, top_n=5) -> dict:
-        if instance.shape[0] != 1:
-            raise ValueError("Instance must be shaped (1, n_features)")
-        shap_values = self.explainer(instance)
-        importance = dict(zip(self.feature_names, shap_values.values[0]))
-        sorted_items = sorted(importance.items(), key=lambda x: abs(x[1]), reverse=True)
-        return {k: round(v, 4) for k, v in sorted_items[:top_n]}
+    attention_scores = explain_attention(applicant)
+    print(json.dumps(attention_scores, indent=2))
+
+if __name__ == "__main__":
+    pinfl_to_debug = "20101862710039"  # 🔧 Replace with test PINFL
+    explain_from_db(pinfl_to_debug)
