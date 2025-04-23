@@ -1,18 +1,20 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
 from app.services.data_ingestion import fetch_user_data_by_pinfl
-from app.services.ai_pipeline import run_full_scoring_pipeline
+from app.services.training_pipeline import run_full_scoring_pipeline
 from app.schemas.applicant_schema import ScoringResponse
 
-router = APIRouter()
+router = APIRouter(tags=["Scoring"])
 
-@router.get("/", response_model=ScoringResponse)
+@router.get("/score", response_model=ScoringResponse)
 def get_score(pinfl: str = Query(..., min_length=10, max_length=20)):
     """
-    Run full AI scoring pipeline for the given user's PINFL.
+    Run the full AI-based credit scoring pipeline for a given applicant by PINFL.
+
+    Returns risk score, loan limit, fraud risk, approval decision, explanations, etc.
     """
     applicant = fetch_user_data_by_pinfl(pinfl)
     if not applicant:
-        return {"status": "error", "message": "Applicant not found", "pinfl": pinfl}
+        raise HTTPException(status_code=404, detail=f"No applicant found for PINFL: {pinfl}")
 
     result = run_full_scoring_pipeline(applicant)
     return result

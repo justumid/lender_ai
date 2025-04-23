@@ -1,76 +1,63 @@
+import os
+import json
 import torch
 import torch.nn as nn
+import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
-import json
-import os
 
 from models.deep_encoder import DeepCreditEncoder
 from models.transformer_heads import RiskClassifierHead, LoanLimitRegressor, FraudDetectorHead
 from models.fraud_vae import FraudVAE
 from models.simclr_encoder import SimCLREncoder
 from trainer import DeepTrainer
+from models.utils import log_memory_usage  # ✅ added
 
-# 🔧 Training configuration
+# 🔧 Configuration
 EPOCHS = 30
 BATCH_SIZE = 32
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DATA_PATH = "demo_data/synthetic_dataset.json"
+CHECKPOINT_DIR = "checkpoints"
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
 def load_dataset(path=DATA_PATH):
     with open(path, "r") as f:
-        raw_data = json.load(f)
+        raw = json.load(f)
 
-    X, y_risk, y_limit = [], [], []
-    for rec in raw_data:
+    X = []
+    for rec in raw:
         seq = rec.get("sequence_tensor", [])
         if not seq or len(seq) != 12:
             continue
         X.append(seq)
-        y_risk.append(rec.get("y_risk", 0))
-        y_limit.append(rec.get("loan_limit", 0))
 
-    X = torch.tensor(X, dtype=torch.float32)
-    y_risk = torch.tensor(y_risk, dtype=torch.float32)
-    y_limit = torch.tensor(y_limit, dtype=torch.float32)
-    return X, y_risk, y_limit
+    return torch.tensor(X, dtype=torch.float32)
 
 def train():
-    # Load and prepare dataset
-    X, y_risk, y_limit = load_dataset()
-    dataset = TensorDataset(X, y_risk, y_limit)
+    log_memory_usage("🚀 Before Training Loop")  # ✅
+
+    X = load_dataset()
+    dataset = TensorDataset(X)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    # Initialize models
     encoder = DeepCreditEncoder().to(DEVICE)
-    risk_head = RiskClassifierHead().to(DEVICE)
-    limit_head = LoanLimitRegressor().to(DEVICE)
-    fraud_head = FraudDetectorHead().to(DEVICE)
-    vae = FraudVAE().to(DEVICE)
-    simclr = SimCLREncoder().to(DEVICE)
+    vae = FraudVAE(input_dim=15, seq_len=12).to(DEVICE)
+    simclr = SimCLREncoder(input_dim=15, seq_len=12).to(DEVICE)
 
-    # Optimizer and loss functions
     optimizer = torch.optim.Adam(
         list(encoder.parameters()) +
-        list(risk_head.parameters()) +
-        list(limit_head.parameters()) +
-        list(fraud_head.parameters()) +
         list(vae.parameters()) +
         list(simclr.parameters()),
         lr=1e-3
     )
 
     loss_funcs = {
-        "bce": nn.BCELoss(),
         "mse": nn.MSELoss()
     }
 
-    # Trainer class
     trainer = DeepTrainer(
         models={
             "encoder": encoder,
-            "risk": risk_head,
-            "limit": limit_head,
-            "fraud": fraud_head,
             "vae": vae,
             "simclr": simclr
         },
@@ -79,20 +66,23 @@ def train():
         device=DEVICE
     )
 
-    # Training loop
-    for epoch in range(EPOCHS):
-        print(f"\n--- Epoch {epoch + 1}/{EPOCHS} ---")
+    for epoch in range(1, EPOCHS + 1):
+        log_memory_usage(f"🧠 Epoch {epoch}/{EPOCHS}")  # ✅
         losses = trainer.train_epoch(loader)
-        print("Losses:", losses)
 
-    # Save models
-    os.makedirs("checkpoints", exist_ok=True)
-    torch.save(encoder.state_dict(), "checkpoints/encoder.pt")
-    torch.save(risk_head.state_dict(), "checkpoints/risk_head.pt")
-    torch.save(limit_head.state_dict(), "checkpoints/limit_head.pt")
-    torch.save(fraud_head.state_dict(), "checkpoints/fraud_head.pt")
-    torch.save(vae.state_dict(), "checkpoints/vae.pt")
-    torch.save(simclr.state_dict(), "checkpoints/simclr.pt")
+        print(f"✅ Losses: {losses}")
+
+        torch.save(encoder.state_dict(), os.path.join(CHECKPOINT_DIR, f"encoder_epoch{epoch}.pt"))
+        torch.save(vae.state_dict(), os.path.join(CHECKPOINT_DIR, f"vae_epoch{epoch}.pt"))
+        torch.save(simclr.state_dict(), os.path.join(CHECKPOINT_DIR, f"simclr_epoch{epoch}.pt"))
+
+    # Final save
+    torch.save(encoder.state_dict(), os.path.join(CHECKPOINT_DIR, "encoder.pt"))
+    torch.save(vae.state_dict(), os.path.join(CHECKPOINT_DIR, "vae.pt"))
+    torch.save(simclr.state_dict(), os.path.join(CHECKPOINT_DIR, "simclr.pt"))
+
+    log_memory_usage("✅ After Training Complete")  # ✅
+    print("✅ Training complete. All models saved.")
 
 if __name__ == "__main__":
     train()

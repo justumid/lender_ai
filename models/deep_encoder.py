@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+
 class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -8,17 +9,18 @@ class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
 
     def forward(self, src, src_mask=None, src_key_padding_mask=None):
         src2, attn = self.self_attn(
-            src, src, src, attn_mask=src_mask,
+            src, src, src,
+            attn_mask=src_mask,
             key_padding_mask=src_key_padding_mask,
-            need_weights=True, average_attn_weights=False
+            need_weights=True,
+            average_attn_weights=False
         )
-        self.attn_weights = attn  # shape: [B, N, T, T]
+        self.attn_weights = attn
         src = src + self.dropout1(src2)
         src = self.norm1(src)
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
         src = src + self.dropout2(src2)
-        src = self.norm2(src)
-        return src
+        return self.norm2(src)
 
 
 class PositionalEncoding(nn.Module):
@@ -27,18 +29,24 @@ class PositionalEncoding(nn.Module):
         pe = torch.zeros(max_len, dim_model)
         position = torch.arange(0, max_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, dim_model, 2) * (-torch.log(torch.tensor(10000.0)) / dim_model))
-
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.pe = pe.unsqueeze(0)
+        self.pe = pe.unsqueeze(0)  # [1, max_len, dim_model]
 
     def forward(self, x):
         return x + self.pe[:, :x.size(1)].to(x.device)
 
 
 class DeepCreditEncoder(nn.Module):
-    def __init__(self, salary_input_dim=5, credit_input_dim=5,
-                 hidden_dim=128, nhead=4, nlayers=2, return_attention=False):
+    def __init__(
+        self,
+        salary_input_dim=5,
+        credit_input_dim=10,
+        hidden_dim=128,
+        nhead=4,
+        nlayers=2,
+        return_attention=False
+    ):
         super().__init__()
         self.return_attention = return_attention
 
@@ -48,11 +56,11 @@ class DeepCreditEncoder(nn.Module):
         self.salary_pos = PositionalEncoding(dim_model=hidden_dim * 2)
         self.credit_pos = PositionalEncoding(dim_model=hidden_dim * 2)
 
-        self.salary_layers = nn.ModuleList([
+        self.salary_transformer = nn.ModuleList([
             CustomTransformerEncoderLayer(d_model=hidden_dim * 2, nhead=nhead, batch_first=True)
             for _ in range(nlayers)
         ])
-        self.credit_layers = nn.ModuleList([
+        self.credit_transformer = nn.ModuleList([
             CustomTransformerEncoderLayer(d_model=hidden_dim * 2, nhead=nhead, batch_first=True)
             for _ in range(nlayers)
         ])
@@ -66,24 +74,31 @@ class DeepCreditEncoder(nn.Module):
         )
 
     def forward(self, salary_seq: torch.Tensor, credit_seq: torch.Tensor):
-        salary_out, _ = self.salary_lstm(salary_seq)
-        credit_out, _ = self.credit_lstm(credit_seq)
+        # LSTM encoding
+        salary_out, _ = self.salary_lstm(salary_seq)   # [B, T, 2H]
+        credit_out, _ = self.credit_lstm(credit_seq)   # [B, T, 2H]
 
+        # Positional encoding
         salary_encoded = self.salary_pos(salary_out)
         credit_encoded = self.credit_pos(credit_out)
 
         attn_s, attn_c = [], []
-        for layer in self.salary_layers:
+
+        for layer in self.salary_transformer:
             salary_encoded = layer(salary_encoded)
-            if self.return_attention: attn_s.append(layer.attn_weights)
+            if self.return_attention:
+                attn_s.append(layer.attn_weights)
 
-        for layer in self.credit_layers:
+        for layer in self.credit_transformer:
             credit_encoded = layer(credit_encoded)
-            if self.return_attention: attn_c.append(layer.attn_weights)
+            if self.return_attention:
+                attn_c.append(layer.attn_weights)
 
-        salary_vec = salary_encoded[:, 0, :]
-        credit_vec = credit_encoded[:, 0, :]
-        fused = self.fusion(torch.cat([salary_vec, credit_vec], dim=1))
+        # Use first token embedding (like CLS)
+        salary_vec = salary_encoded[:, 0, :]  # [B, 2H]
+        credit_vec = credit_encoded[:, 0, :]  # [B, 2H]
+
+        fused = self.fusion(torch.cat([salary_vec, credit_vec], dim=1))  # [B, H]
 
         if self.return_attention:
             return fused, attn_s, attn_c

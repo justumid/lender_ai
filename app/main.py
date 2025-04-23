@@ -4,7 +4,11 @@ from app.api.score_api import router as score_router
 
 app = FastAPI(
     title="AI Credit Scoring API",
-    description="⚙️ Fully Deep Learning-based Credit Risk, Fraud & Limit Scoring API.\n\nPowered by Transformers, LSTM, VAE, SimCLR.",
+    description=(
+        "⚙️ Fully Deep Learning-based Credit Risk, Fraud & Limit Scoring System.\n"
+        "- Built with Transformers, LSTM, VAE, SimCLR.\n"
+        "- Includes explainability and segmentation."
+    ),
     version="1.0.0",
     contact={
         "name": "Taqsim Solution",
@@ -12,21 +16,25 @@ app = FastAPI(
     },
     license_info={
         "name": "MIT",
-        "url": "https://opensource.org/licenses/MIT"
+        "url": "https://opensource.org/licenses/MIT",
     }
 )
 
-# Optional: CORS
+# CORS: allow all origins for now (can be restricted later)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Replace with frontend URL in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(score_router, prefix="/score")
+# API routing
+app.include_router(score_router, prefix="/score", tags=["Scoring"])
 
-@app.get("/", tags=["Health Check"])
+@app.get("/", tags=["Health"])
 def health_check():
-    return {"status": "ok", "message": "AI scoring API is running"}
+    """
+    Check if API is up and responding.
+    """
+    return {"status": "ok", "message": "AI Credit Scoring API is live 🚀"}
