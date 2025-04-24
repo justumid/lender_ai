@@ -4,6 +4,9 @@ import torch.nn.functional as F
 
 
 class FraudVAE(nn.Module):
+    """
+    Variational Autoencoder (VAE) used for fraud anomaly detection.
+    """
     def __init__(self, input_dim=15, seq_len=12, latent_dim=16):
         super().__init__()
         self.input_dim = input_dim
@@ -11,7 +14,7 @@ class FraudVAE(nn.Module):
         self.latent_dim = latent_dim
         self.flattened_dim = input_dim * seq_len  # e.g., 12 × 15 = 180
 
-        # Encoder: project flattened input to latent space
+        # Encoder: [B, 180] → [B, latent_dim]
         self.encoder = nn.Sequential(
             nn.Linear(self.flattened_dim, 256),
             nn.BatchNorm1d(256),
@@ -22,14 +25,14 @@ class FraudVAE(nn.Module):
         self.fc_mu = nn.Linear(128, latent_dim)
         self.fc_logvar = nn.Linear(128, latent_dim)
 
-        # Decoder: reconstruct original flattened input from latent
+        # Decoder: [B, latent_dim] → [B, 180]
         self.decoder = nn.Sequential(
             nn.Linear(latent_dim, 128),
             nn.ReLU(),
             nn.Linear(128, 256),
             nn.ReLU(),
             nn.Linear(256, self.flattened_dim),
-            nn.Sigmoid()  # to normalize output in range [0, 1]
+            nn.Sigmoid()  # normalized output
         )
 
     def encode(self, x: torch.Tensor):
@@ -46,7 +49,7 @@ class FraudVAE(nn.Module):
 
     def forward(self, x: torch.Tensor):
         """
-        x: [B, 12, 15]
+        x: [B, 12, 15] → flatten → encode → sample → decode → [B, 12, 15]
         """
         x_flat = x.view(x.size(0), -1)  # [B, 180]
         mu, logvar = self.encode(x_flat)
@@ -57,7 +60,16 @@ class FraudVAE(nn.Module):
 
     def anomaly_score(self, x: torch.Tensor):
         """
-        Compute anomaly score as reconstruction error.
+        Compute MSE-based anomaly score per sample.
         """
         recon, _, _ = self.forward(x)
         return F.mse_loss(recon, x, reduction='none').mean(dim=(1, 2))  # [B]
+
+    def vae_loss(self, x: torch.Tensor, beta: float = 1.0):
+        """
+        Computes VAE loss: reconstruction + β × KL divergence
+        """
+        recon, mu, logvar = self.forward(x)
+        recon_loss = F.mse_loss(recon, x, reduction='mean')
+        kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        return recon_loss + beta * kl

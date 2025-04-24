@@ -1,79 +1,66 @@
-import torch
+from pathlib import Path
+from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from typing import Dict, Any
-from tqdm import tqdm
-from models.utils import log_memory_usage  # ✅ import memory logger
+import torch
+import time
 
 class DeepTrainer:
-    def __init__(
-        self,
-        models: Dict[str, torch.nn.Module],
-        optim: torch.optim.Optimizer,
-        loss_funcs: Dict[str, Any],
-        device: torch.device = torch.device("cpu")
-    ):
-        """
-        models: dict with keys ['encoder', 'vae', 'simclr']
-        loss_funcs: dict with keys ['mse']
-        """
+    def __init__(self, models, optim, loss_funcs, device):
         self.models = models
         self.optim = optim
         self.loss_funcs = loss_funcs
         self.device = device
+        self.writer = SummaryWriter(log_dir=Path("runs") / time.strftime("%Y%m%d-%H%M%S"))
 
-        for model in models.values():
-            model.to(device)
-
-    def train_epoch(self, loader: DataLoader):
+    def train_epoch(self, train_loader, epoch):
         for model in self.models.values():
             model.train()
 
-        total_losses = {"vae": 0.0, "simclr": 0.0}
-        log_memory_usage("🔄 Start of Epoch")  # ✅
+        epoch_losses = {"recon": 0.0, "fraud": 0.0, "risk": 0.0, "limit": 0.0, "total": 0.0}
+        total_batches = len(train_loader)
 
-        for batch_idx, (x,) in enumerate(tqdm(loader, desc="Training")):
-            x = x.to(self.device)
-            salary, credit = x[:, :, :5], x[:, :, 5:]
+        for batch_idx, (batch_x,) in enumerate(train_loader):
+            batch_x = batch_x.to(self.device)
 
+            # Forward pass: encoder
             encoder = self.models["encoder"]
-            z = encoder(salary, credit)
+            embedding = encoder(batch_x[:, :, :5], batch_x[:, :, 5:])  # → [B, 128]
 
-            # VAE loss
-            recon, mu, logvar = self.models["vae"](x)
-            vae_loss = self._vae_loss(recon, x, mu, logvar)
+            # VAE reconstruction loss
+            recon, mu, logvar = self.models["vae"](batch_x)
+            recon_loss = self.loss_funcs["mse"](recon, batch_x)
 
-            # SimCLR loss
-            z_simclr = self.models["simclr"](x)
-            simclr_loss = self._simclr_contrastive_loss(z_simclr)
+            # SimCLR fraud head loss
+            simclr_embedding = self.models["simclr"](batch_x)  # → [B, 64]
+            fraud_logits = self.models["fraud_head"](simclr_embedding)
+            fraud_loss = F.binary_cross_entropy(fraud_logits, torch.ones_like(fraud_logits))
+
+            # Risk head loss (target = 1 for now)
+            risk_logits = self.models["risk_head"](embedding)
+            risk_loss = F.binary_cross_entropy(risk_logits, torch.ones_like(risk_logits))
+
+            # Loan limit head loss (target = 30M UZS)
+            limit_pred = self.models["limit_head"](embedding)
+            limit_loss = F.mse_loss(limit_pred, torch.ones_like(limit_pred) * 30_000_000)
 
             # Total loss
-            total_loss = vae_loss + simclr_loss
+            total_loss = recon_loss + fraud_loss + risk_loss + limit_loss
 
+            # Backward and optimize
             self.optim.zero_grad()
             total_loss.backward()
             self.optim.step()
 
-            total_losses["vae"] += vae_loss.item()
-            total_losses["simclr"] += simclr_loss.item()
+            # Logging
+            epoch_losses["recon"] += recon_loss.item()
+            epoch_losses["fraud"] += fraud_loss.item()
+            epoch_losses["risk"] += risk_loss.item()
+            epoch_losses["limit"] += limit_loss.item()
+            epoch_losses["total"] += total_loss.item()
 
-            if batch_idx % 10 == 0:
-                log_memory_usage(f"🧪 Batch {batch_idx}")  # ✅
+        # Average losses for the epoch
+        for key in epoch_losses:
+            epoch_losses[key] /= total_batches
+            self.writer.add_scalar(f"Loss/{key}", epoch_losses[key], epoch)
 
-        avg_losses = {k: round(v / len(loader), 4) for k, v in total_losses.items()}
-        log_memory_usage("✅ End of Epoch")  # ✅
-        return avg_losses
-
-    def _vae_loss(self, recon_x, x, mu, logvar, beta=1.0):
-        recon = F.mse_loss(recon_x, x, reduction="mean")
-        kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-        return recon + beta * kl
-
-    def _simclr_contrastive_loss(self, z, temperature=0.5):
-        z = F.normalize(z, dim=1)
-        sim = torch.matmul(z, z.T) / temperature
-        mask = torch.eye(len(z), dtype=torch.bool).to(z.device)
-        sim = sim.masked_fill(mask, -9e15)
-        positives = torch.cat([torch.diag(sim, len(z)//2), torch.diag(sim, -len(z)//2)])
-        loss = -positives + torch.logsumexp(sim, dim=1)
-        return loss.mean()
+        return epoch_losses

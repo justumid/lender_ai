@@ -6,14 +6,16 @@ import torch.nn.functional as F
 class MLPProjectionHead(nn.Module):
     def __init__(self, input_dim: int, projection_dim: int = 64):
         """
-        Projection head used in SimCLR after encoder.
+        Projection head for SimCLR — used after encoder.
+        Applies a 2-layer MLP with normalization and activation.
         """
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, input_dim),
             nn.BatchNorm1d(input_dim),
             nn.ReLU(),
-            nn.Linear(input_dim, projection_dim)
+            nn.Linear(input_dim, projection_dim),
+            nn.BatchNorm1d(projection_dim)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -23,14 +25,13 @@ class MLPProjectionHead(nn.Module):
 class SimCLREncoder(nn.Module):
     def __init__(self, seq_len: int = 12, input_dim: int = 15, hidden_dim: int = 128, projection_dim: int = 64):
         """
-        SimCLR encoder network.
-        input_dim = 15: sequence features (e.g., 5 salary + 10 credit features)
-        seq_len = 12: sequence length (time steps)
+        SimCLR encoder for time-series data of shape [B, seq_len, input_dim].
+        Example: [B, 12, 15] flattened to [B, 180] → encoded → projected → L2 norm
         """
         super().__init__()
         self.seq_len = seq_len
         self.input_dim = input_dim
-        self.flattened_dim = seq_len * input_dim  # e.g., 12 × 15 = 180
+        self.flattened_dim = seq_len * input_dim
 
         self.encoder = nn.Sequential(
             nn.Linear(self.flattened_dim, hidden_dim),
@@ -44,15 +45,12 @@ class SimCLREncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through encoder and projection head.
-
         Args:
-            x (Tensor): Input tensor of shape [B, 12, 15]
-
+            x: Tensor of shape [B, 12, 15]
         Returns:
-            Tensor: Normalized embedding of shape [B, projection_dim]
+            L2-normalized projection: [B, projection_dim]
         """
-        x_flat = x.view(x.size(0), -1)       # Flatten [B, 12, 15] -> [B, 180]
-        h = self.encoder(x_flat)             # Encoder output [B, hidden_dim]
-        z = self.projection(h)               # Projected to [B, projection_dim]
-        return F.normalize(z, dim=1)         # L2-normalize for contrastive loss
+        x_flat = x.view(x.size(0), -1)
+        h = self.encoder(x_flat)
+        z = self.projection(h)
+        return F.normalize(z, dim=1)
