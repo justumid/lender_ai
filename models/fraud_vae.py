@@ -51,11 +51,11 @@ class FraudVAE(nn.Module):
         """
         x: [B, 12, 15] → flatten → encode → sample → decode → [B, 12, 15]
         """
-        x_flat = x.view(x.size(0), -1)  # [B, 180]
+        x_flat = x.reshape(x.size(0), -1)  # ✅ Safe alternative to view()
         mu, logvar = self.encode(x_flat)
         z = self.reparameterize(mu, logvar)
         recon_flat = self.decode(z)
-        recon = recon_flat.view(x.size())  # [B, 12, 15]
+        recon = recon_flat.reshape(x.size())    # [B, 12, 15]
         return recon, mu, logvar
 
     def anomaly_score(self, x: torch.Tensor):

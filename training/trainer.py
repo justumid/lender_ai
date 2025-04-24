@@ -19,34 +19,40 @@ class DeepTrainer:
         epoch_losses = {"recon": 0.0, "fraud": 0.0, "risk": 0.0, "limit": 0.0, "total": 0.0}
         total_batches = len(train_loader)
 
-        for batch_idx, (batch_x,) in enumerate(train_loader):
+        for batch_idx, (batch_x, static_score) in enumerate(train_loader): 
             batch_x = batch_x.to(self.device)
 
-            # Forward pass: encoder
-            encoder = self.models["encoder"]
-            embedding = encoder(batch_x[:, :, :5], batch_x[:, :, 5:])  # → [B, 128]
+            # Extract static_score (assumed to be last feature)
+            static_score = batch_x[:, 0, -1].unsqueeze(1)  # shape [B, 1]
 
-            # VAE reconstruction loss
-            recon, mu, logvar = self.models["vae"](batch_x)
+            # Encoder forward pass
+            encoder = self.models["encoder"]
+            embedding = encoder(batch_x[:, :, :5], batch_x[:, :, 5:-1])  # exclude static score → [B, 128]
+
+            # VAE reconstruction
+            recon, mu, logvar = self.models["vae"](batch_x)  # exclude static score
             recon_loss = self.loss_funcs["mse"](recon, batch_x)
 
-            # SimCLR fraud head loss
-            simclr_embedding = self.models["simclr"](batch_x)  # → [B, 64]
-            fraud_logits = self.models["fraud_head"](simclr_embedding)
+            # SimCLR forward
+            simclr_embedding = self.models["simclr"](batch_x) 
+            fraud_input = torch.cat([simclr_embedding, static_score], dim=1)
+            fraud_logits = self.models["fraud_head"](fraud_input)
             fraud_loss = F.binary_cross_entropy(fraud_logits, torch.ones_like(fraud_logits))
 
-            # Risk head loss (target = 1 for now)
-            risk_logits = self.models["risk_head"](embedding)
+            # Risk head
+            risk_input = torch.cat([embedding, static_score], dim=1)
+            risk_logits = self.models["risk_head"](risk_input)
             risk_loss = F.binary_cross_entropy(risk_logits, torch.ones_like(risk_logits))
 
-            # Loan limit head loss (target = 30M UZS)
-            limit_pred = self.models["limit_head"](embedding)
+            # Loan limit head
+            limit_input = torch.cat([embedding, static_score], dim=1)
+            limit_pred = self.models["limit_head"](limit_input)
             limit_loss = F.mse_loss(limit_pred, torch.ones_like(limit_pred) * 30_000_000)
 
             # Total loss
             total_loss = recon_loss + fraud_loss + risk_loss + limit_loss
 
-            # Backward and optimize
+            # Optimization
             self.optim.zero_grad()
             total_loss.backward()
             self.optim.step()
@@ -58,7 +64,7 @@ class DeepTrainer:
             epoch_losses["limit"] += limit_loss.item()
             epoch_losses["total"] += total_loss.item()
 
-        # Average losses for the epoch
+        # Epoch-wise average
         for key in epoch_losses:
             epoch_losses[key] /= total_batches
             self.writer.add_scalar(f"Loss/{key}", epoch_losses[key], epoch)

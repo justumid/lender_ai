@@ -5,6 +5,7 @@ import psycopg2
 from typing import List
 from app.services.preprocessing import extract_sequence_tensor
 from app.services.data_ingestion import get_applicant_by_pinfl
+from app.services.static_scoring_engine import compute_static_score
 
 # 🔧 Database Configuration
 DB_CONFIG = {
@@ -35,8 +36,13 @@ def get_unique_pinfls(limit=1000) -> List[str]:
 
 def build_dataset():
     """
-    Extracts input sequences for each applicant using LSTM-compatible [12, 15] format.
-    Saves the result as a synthetic unsupervised training dataset.
+    Extracts input sequences and static scores for training.
+    Output JSON format:
+    {
+        "pinfl": "string",
+        "sequence_tensor": [[...], ...],  # shape [12, 15]
+        "static_score": float
+    }
     """
     dataset = []
     pinfls = get_unique_pinfls()
@@ -54,11 +60,14 @@ def build_dataset():
                 print(f"[SKIP] Incomplete data for {pinfl}")
                 continue
 
-            sequence_tensor = extract_sequence_tensor(applicant)  # Tensor shape: [12, 15]
+            sequence_tensor = extract_sequence_tensor(applicant)  # [12, 15]
+            static_result = compute_static_score(applicant)
+            static_score = static_result["static_score"]
 
             dataset.append({
                 "pinfl": pinfl,
-                "sequence_tensor": sequence_tensor.tolist()
+                "sequence_tensor": sequence_tensor.tolist(),
+                "static_score": float(static_score)
             })
 
         except Exception as e:

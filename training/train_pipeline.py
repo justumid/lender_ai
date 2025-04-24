@@ -13,6 +13,7 @@ from models.utils import log_memory_usage
 from app.services.preprocessing import extract_sequence_tensor
 from app.schemas.scoring_response import ScoringResponse
 from models.transformer_heads import RiskClassifierHead, LoanLimitRegressor, FraudDetectorHead
+from app.services.static_scoring_engine import compute_static_score
 
 
 # 🔧 Config
@@ -26,20 +27,26 @@ os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
 def load_dataset(path=DATA_PATH):
     """
-    Loads the [12, 15] sequence tensor dataset from JSON into a PyTorch Tensor.
+    Load dataset with sequence_tensor and static_score.
+    Returns:
+        - X: [B, 12, 15] tensor
+        - static_scores: [B, 1] tensor
     """
     with open(path, "r") as f:
         raw = json.load(f)
 
-    X = []
+    sequences, scores = [], []
     for rec in raw:
         seq = rec.get("sequence_tensor", [])
+        static_score = rec.get("static_score", 0)
         if not seq or len(seq) != 12 or len(seq[0]) != 15:
             continue
-        X.append(seq)
+        sequences.append(seq)
+        scores.append([float(static_score) / 100.0])  # normalize
 
-    return torch.tensor(X, dtype=torch.float32)
-
+    X = torch.tensor(sequences, dtype=torch.float32)
+    S = torch.tensor(scores, dtype=torch.float32)
+    return X, S
 def save_model(model, name: str, epoch: int = None):
     """
     Saves model weights to the checkpoint directory.
@@ -56,9 +63,9 @@ def build_models() -> dict:
         "encoder": DeepCreditEncoder().to(DEVICE),
         "vae": FraudVAE(input_dim=15, seq_len=12).to(DEVICE),
         "simclr": SimCLREncoder(input_dim=15, seq_len=12).to(DEVICE),
-        "risk_head": RiskClassifierHead(input_dim=128).to(DEVICE),
-        "fraud_head": FraudDetectorHead(input_dim=64).to(DEVICE),
-        "limit_head": LoanLimitRegressor(input_dim=128).to(DEVICE)
+        "risk_head": RiskClassifierHead(input_dim=129).to(DEVICE),
+        "fraud_head": FraudDetectorHead(input_dim=65).to(DEVICE),
+        "limit_head": LoanLimitRegressor(input_dim=129).to(DEVICE)
     }
 
 def train():
@@ -67,10 +74,11 @@ def train():
     """
     log_memory_usage("🚀 Starting Training")
 
-    # Load dataset
-    X = load_dataset()
-    dataset = TensorDataset(X)
+
+    X, S = load_dataset()
+    dataset = TensorDataset(X, S)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+
 
     # Initialize models
     models = build_models()
@@ -136,19 +144,19 @@ def load_all_models(checkpoint_dir: str = "checkpoints") -> dict:
     models["simclr"] = simclr
 
     # Load risk classifier head
-    risk_head = RiskClassifierHead(input_dim=128)
+    risk_head = RiskClassifierHead(input_dim=129)
     risk_head.load_state_dict(torch.load(os.path.join(checkpoint_dir, "risk_head.pt"), map_location="cpu"))
     risk_head.eval()
     models["risk_head"] = risk_head
 
     # Load fraud detection head
-    fraud_head = FraudDetectorHead(input_dim=64)
+    fraud_head = FraudDetectorHead(input_dim=65)
     fraud_head.load_state_dict(torch.load(os.path.join(checkpoint_dir, "fraud_head.pt"), map_location="cpu"))
     fraud_head.eval()
     models["fraud_head"] = fraud_head
 
     # Load loan limit regression head
-    limit_head = LoanLimitRegressor(input_dim=128)
+    limit_head = LoanLimitRegressor(input_dim=129)
     limit_head.load_state_dict(torch.load(os.path.join(checkpoint_dir, "limit_head.pt"), map_location="cpu"))
     limit_head.eval()
     models["limit_head"] = limit_head
@@ -173,14 +181,22 @@ def run_full_scoring_pipeline(applicant):
 
     with torch.no_grad():
         # 🔐 Deep embedding
-        embedding = encoder(salary_seq, credit_seq)
+        embedding = encoder(salary_seq, credit_seq)  # [1, 128]
 
-        # 🧠 Risk score from deep classifier head (0-100)
-        risk_score = risk_head(embedding)
+        # 📈 Get static score
+        static_result = compute_static_score(applicant)
+        static_score = float(static_result.get("static_score", 0)) / 100.0
+        static_score_tensor = torch.tensor([[static_score]], dtype=torch.float32)
+
+        # 🔗 Concatenate static_score → [1, 129]
+        embedding_with_static = torch.cat([embedding, static_score_tensor], dim=1)
+
+        # 🧠 Risk score from classifier head (0-100)
+        risk_score = risk_head(embedding_with_static)
         final_score = float(torch.clamp(risk_score * 100.0, 0.0, 100.0).item())
 
         # 💰 Loan limit prediction (regression)
-        loan_limit = int(torch.clamp(limit_head(embedding), 0).item())
+        loan_limit = int(torch.clamp(limit_head(embedding_with_static), 0).item())
 
         # 🔍 VAE anomaly detection
         recon, mu, logvar = vae(sequence_tensor)
@@ -188,7 +204,8 @@ def run_full_scoring_pipeline(applicant):
 
         # 🛡️ SimCLR + fraud head
         simclr_embedding = simclr(sequence_tensor)
-        fraud_score = float(fraud_head(simclr_embedding).item())
+        simclr_with_static = torch.cat([simclr_embedding, static_score_tensor], dim=1)
+        fraud_score = float(fraud_head(simclr_with_static).item())
 
         # 🔐 Confidence & Alert
         confidence_level = (
@@ -198,15 +215,16 @@ def run_full_scoring_pipeline(applicant):
         )
         fraud_alert = "HIGH" if fraud_score > 0.5 else "LOW"
 
-        # 🧠 Segment ID (can later be KMeans clustered)
+        # 🧠 Segment ID (placeholder for future clustering)
         segment_id = "SEG_A1"
 
         # ✅ Approval decision
-        approval_decision = None
         if final_score >= 70 and fraud_score < 0.3 and vae_anomaly < 0.2:
             approval_decision = "APPROVED"
         elif final_score < 50 or vae_anomaly > 0.6 or fraud_score > 0.5:
             approval_decision = "REJECTED"
+        else:
+            approval_decision = None
 
         # 🧾 Human-readable explanation
         summary_parts = [

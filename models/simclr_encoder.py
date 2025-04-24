@@ -23,7 +23,7 @@ class MLPProjectionHead(nn.Module):
 
 
 class SimCLREncoder(nn.Module):
-    def __init__(self, seq_len: int = 12, input_dim: int = 15, hidden_dim: int = 128, projection_dim: int = 64):
+    def __init__(self, seq_len: int = 12, input_dim: int = 15, hidden_dim: int = 129, projection_dim: int = 64):
         """
         SimCLR encoder for time-series data of shape [B, seq_len, input_dim].
         Example: [B, 12, 15] flattened to [B, 180] → encoded → projected → L2 norm
@@ -50,7 +50,7 @@ class SimCLREncoder(nn.Module):
         Returns:
             L2-normalized projection: [B, projection_dim]
         """
-        x_flat = x.view(x.size(0), -1)
+        x_flat = x.reshape(x.size(0), -1)  # ✅ safer than view()
         h = self.encoder(x_flat)
         z = self.projection(h)
         return F.normalize(z, dim=1)
